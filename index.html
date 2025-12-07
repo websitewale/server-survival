@@ -81,6 +81,22 @@
             </div>
         </div>
 
+        <!-- Service Health Panel (Under Score Details) -->
+        <div id="healthPanel" class="absolute top-44 right-4 glass-panel rounded-xl p-4 w-60 pointer-events-auto">
+            <h3 class="text-xs font-bold text-red-400 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1">
+                🔧 Service Health</h3>
+            <div id="service-health-list" class="text-sm font-mono">
+                <div class="text-green-400 text-xs">All services healthy</div>
+            </div>
+            <div class="text-xs text-gray-500 mt-2 pt-2 border-t border-gray-700">
+                Click damaged services to repair
+            </div>
+        </div>
+
+        <!-- Intervention Warnings Container (Center Top) -->
+        <div id="intervention-warnings" class="fixed top-20 left-1/2 transform -translate-x-1/2 z-50 pointer-events-none flex flex-col items-center">
+        </div>
+
 
         <!-- Time Control Panel (Top Center) -->
         <div
@@ -535,7 +551,7 @@
             </div>
 
             <div class="flex justify-between items-center">
-                <button id="tutorial-skip" class="text-gray-500 hover:text-gray-300 text-sm transition">
+                <button id="tutorial-skip" class="text-gray-500 hover:text-gray-300 text-sm transition" onclick="window.tutorial?.skip()">
                     Skip Tutorial
                 </button>
                 <div class="flex gap-2">

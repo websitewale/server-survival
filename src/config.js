@@ -180,6 +180,52 @@ const CONFIG = {
             duration: 15,
             maliciousPercent: 0.40,
             warningTime: 5
+        },
+
+        // Service degradation - services lose health over time
+        degradation: {
+            enabled: true,
+            healthDecayRate: 0.5,      // Health points lost per second (at 100 max health)
+            criticalHealth: 30,         // Below this, capacity is halved
+            repairCost: 10,             // Cost to repair per health point
+            autoRepairRate: 0,          // Health recovered per second (0 = manual only)
+        },
+
+        // Traffic pattern shifts - periodic changes to traffic distribution
+        trafficShifts: {
+            enabled: true,
+            interval: 120,              // Seconds between shifts
+            duration: 45,               // How long the shift lasts
+            warningTime: 10,            // Warning before shift starts
+            patterns: [
+                { name: 'API Heavy', distribution: { STATIC: 0.10, READ: 0.35, WRITE: 0.25, UPLOAD: 0.05, SEARCH: 0.15, MALICIOUS: 0.10 } },
+                { name: 'Storage Surge', distribution: { STATIC: 0.45, READ: 0.10, WRITE: 0.10, UPLOAD: 0.20, SEARCH: 0.05, MALICIOUS: 0.10 } },
+                { name: 'Search Storm', distribution: { STATIC: 0.15, READ: 0.15, WRITE: 0.10, UPLOAD: 0.05, SEARCH: 0.40, MALICIOUS: 0.15 } },
+                { name: 'Write Flood', distribution: { STATIC: 0.10, READ: 0.10, WRITE: 0.45, UPLOAD: 0.10, SEARCH: 0.10, MALICIOUS: 0.15 } },
+            ]
+        },
+
+        // Random events that require immediate attention
+        randomEvents: {
+            enabled: true,
+            minInterval: 60,            // Minimum seconds between events
+            maxInterval: 180,           // Maximum seconds between events
+            events: [
+                { type: 'COST_SPIKE', name: 'Cloud Price Surge', duration: 30, multiplier: 2.5, description: 'Upkeep costs doubled!' },
+                { type: 'CAPACITY_DROP', name: 'Service Degradation', duration: 20, multiplier: 0.5, description: 'All capacities halved!' },
+                { type: 'TRAFFIC_BURST', name: 'Viral Traffic', duration: 15, rpsMultiplier: 3.0, description: 'Traffic tripled!' },
+                { type: 'MAINTENANCE', name: 'Forced Maintenance', duration: 10, description: 'Random service goes offline!' },
+            ]
+        },
+
+        // RPS acceleration after milestones
+        rpsAcceleration: {
+            enabled: true,
+            milestones: [
+                { time: 300, multiplier: 1.5 },   // After 5 min, 1.5x growth
+                { time: 600, multiplier: 2.0 },   // After 10 min, 2x growth
+                { time: 900, multiplier: 2.5 },   // After 15 min, 2.5x growth
+            ]
         }
     },
     sandbox: {

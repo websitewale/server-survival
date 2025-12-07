@@ -7,7 +7,30 @@ function calculateTargetRPS(gameTimeSeconds) {
     // At 0s: 0.5, at 60s: ~2.5, at 180s: ~4, at 300s: ~5, at 600s: ~6.5
     const base = CONFIG.survival.baseRPS;
     const growth = Math.log(1 + gameTimeSeconds / 30) * 1.8;
-    return base + growth;
+    let targetRPS = base + growth;
+    
+    // Apply milestone acceleration for faster late-game scaling
+    if (CONFIG.survival.rpsAcceleration && STATE.intervention) {
+        const milestones = CONFIG.survival.rpsAcceleration.milestones;
+        let multiplier = 1.0;
+        
+        for (let i = 0; i < milestones.length; i++) {
+            const minutes = gameTimeSeconds / 60;
+            if (minutes >= milestones[i].threshold) {
+                multiplier = milestones[i].multiplier;
+                if (STATE.intervention.currentMilestoneIndex < i + 1) {
+                    STATE.intervention.currentMilestoneIndex = i + 1;
+                    // Add warning when milestone is reached
+                    addInterventionWarning(`RPS SURGE! Traffic increased ×${multiplier.toFixed(1)}`, 'danger', 5000);
+                }
+            }
+        }
+        
+        STATE.intervention.rpsMultiplier = multiplier;
+        targetRPS *= multiplier;
+    }
+    
+    return targetRPS;
 }
 
 function getUpkeepMultiplier() {
@@ -22,7 +45,14 @@ function getUpkeepMultiplier() {
     const max = CONFIG.survival.upkeepScaling.maxMultiplier;
 
     // Smooth curve from base to max
-    return base + (max - base) * progress;
+    let multiplier = base + (max - base) * progress;
+    
+    // Apply random event cost spike if active
+    if (STATE.intervention?.costMultiplier) {
+        multiplier *= STATE.intervention.costMultiplier;
+    }
+    
+    return multiplier;
 }
 
 function updateMaliciousSpike(dt) {
@@ -130,6 +160,237 @@ function endMaliciousSpike() {
 
     STATE.sound.playSuccess();
 }
+
+// ==================== INTERVENTION MECHANICS ====================
+
+function addInterventionWarning(message, type = 'warning', duration = 4000) {
+    const warningsContainer = document.getElementById('intervention-warnings');
+    if (!warningsContainer) return;
+    
+    const warning = document.createElement('div');
+    const colorClasses = {
+        'warning': 'bg-yellow-900/80 border-yellow-500 text-yellow-400',
+        'danger': 'bg-red-900/80 border-red-500 text-red-400',
+        'info': 'bg-blue-900/80 border-blue-500 text-blue-400'
+    };
+    
+    warning.className = `${colorClasses[type] || colorClasses.warning} border-2 rounded-lg px-4 py-2 mb-2 animate-pulse`;
+    warning.innerHTML = `<span class="font-bold">${message}</span>`;
+    warningsContainer.appendChild(warning);
+    
+    // Add to state for tracking
+    if (STATE.intervention) {
+        STATE.intervention.warnings.push({ message, type, time: Date.now() });
+    }
+    
+    setTimeout(() => warning.remove(), duration);
+}
+
+function updateTrafficShift(dt) {
+    if (STATE.gameMode !== 'survival') return;
+    if (!CONFIG.survival.trafficShift?.enabled) return;
+    if (!STATE.intervention) return;
+    
+    STATE.intervention.trafficShiftTimer += dt;
+    
+    const config = CONFIG.survival.trafficShift;
+    const interval = config.interval;
+    const duration = config.duration;
+    
+    // Check if shift should start
+    if (!STATE.intervention.trafficShiftActive && 
+        STATE.intervention.trafficShiftTimer >= interval) {
+        startTrafficShift();
+    }
+    
+    // Check if shift should end
+    if (STATE.intervention.trafficShiftActive && 
+        STATE.intervention.trafficShiftTimer >= interval + duration) {
+        endTrafficShift();
+        STATE.intervention.trafficShiftTimer = 0; // Reset for next cycle
+    }
+}
+
+function startTrafficShift() {
+    if (!STATE.intervention || STATE.maliciousSpikeActive) return;
+    
+    const config = CONFIG.survival.trafficShift;
+    const shifts = config.shifts;
+    
+    // Pick a random shift
+    const shift = shifts[Math.floor(Math.random() * shifts.length)];
+    STATE.intervention.currentShift = shift;
+    STATE.intervention.trafficShiftActive = true;
+    
+    // Store original distribution
+    STATE.intervention.originalTrafficDist = { ...STATE.trafficDistribution };
+    
+    // Apply the shift
+    const newDist = { ...STATE.trafficDistribution };
+    const boostAmount = 0.25; // Boost the specified type by 25%
+    
+    // Reduce all others proportionally to make room
+    const totalOthers = Object.entries(newDist)
+        .filter(([key]) => key !== shift.type)
+        .reduce((sum, [, val]) => sum + val, 0);
+    
+    Object.keys(newDist).forEach(key => {
+        if (key === shift.type) {
+            newDist[key] = Math.min(0.6, newDist[key] + boostAmount);
+        } else {
+            newDist[key] *= (1 - boostAmount / totalOthers);
+        }
+    });
+    
+    STATE.trafficDistribution = newDist;
+    
+    addInterventionWarning(`📊 ${shift.name} - ${shift.type} traffic surging!`, 'warning', 5000);
+    STATE.sound?.playTone(500, 'sine', 0.2);
+}
+
+function endTrafficShift() {
+    if (!STATE.intervention) return;
+    
+    STATE.intervention.trafficShiftActive = false;
+    
+    // Restore original distribution
+    if (STATE.intervention.originalTrafficDist) {
+        STATE.trafficDistribution = { ...STATE.intervention.originalTrafficDist };
+        STATE.intervention.originalTrafficDist = null;
+    }
+    
+    STATE.intervention.currentShift = null;
+}
+
+function updateRandomEvents(dt) {
+    if (STATE.gameMode !== 'survival') return;
+    if (!CONFIG.survival.randomEvents?.enabled) return;
+    if (!STATE.intervention) return;
+    
+    STATE.intervention.randomEventTimer += dt;
+    
+    const config = CONFIG.survival.randomEvents;
+    
+    // Check if event should trigger
+    if (STATE.intervention.randomEventTimer >= config.checkInterval) {
+        STATE.intervention.randomEventTimer = 0;
+        
+        // 30% chance to trigger an event
+        if (Math.random() < 0.3) {
+            triggerRandomEvent();
+        }
+    }
+    
+    // Check if active event should end
+    if (STATE.intervention.activeEvent && Date.now() >= STATE.intervention.eventEndTime) {
+        endRandomEvent();
+    }
+}
+
+function triggerRandomEvent() {
+    if (!STATE.intervention || STATE.intervention.activeEvent) return;
+    
+    const config = CONFIG.survival.randomEvents;
+    const eventType = config.types[Math.floor(Math.random() * config.types.length)];
+    
+    STATE.intervention.activeEvent = eventType;
+    STATE.intervention.eventEndTime = Date.now() + 30000; // 30 second events
+    
+    switch (eventType) {
+        case 'COST_SPIKE':
+            addInterventionWarning('💰 CLOUD COST SPIKE! Upkeep doubled for 30s', 'danger', 8000);
+            STATE.intervention.costMultiplier = 2.0;
+            break;
+            
+        case 'CAPACITY_DROP':
+            addInterventionWarning('⚡ RESOURCE THROTTLING! Capacity reduced for 30s', 'danger', 8000);
+            STATE.services.forEach(s => {
+                s.tempCapacityReduction = 0.5; // 50% capacity
+            });
+            break;
+            
+        case 'TRAFFIC_BURST':
+            addInterventionWarning('🚀 TRAFFIC BURST! 3× requests for 30s', 'warning', 8000);
+            STATE.intervention.trafficBurstMultiplier = 3.0;
+            break;
+            
+        case 'SERVICE_OUTAGE':
+            // Pick a random service to temporarily disable
+            const services = STATE.services.filter(s => s.type !== 'waf');
+            if (services.length > 0) {
+                const target = services[Math.floor(Math.random() * services.length)];
+                target.isDisabled = true;
+                target.mesh.material.opacity = 0.3;
+                target.mesh.material.transparent = true;
+                addInterventionWarning(`🔧 ${target.type.toUpperCase()} OUTAGE! Service offline for 30s`, 'danger', 8000);
+            }
+            break;
+    }
+    
+    STATE.sound?.playTone(300, 'sawtooth', 0.3);
+}
+
+function endRandomEvent() {
+    if (!STATE.intervention || !STATE.intervention.activeEvent) return;
+    
+    const eventType = STATE.intervention.activeEvent;
+    
+    switch (eventType) {
+        case 'COST_SPIKE':
+            STATE.intervention.costMultiplier = 1.0;
+            break;
+            
+        case 'CAPACITY_DROP':
+            STATE.services.forEach(s => {
+                s.tempCapacityReduction = 1.0;
+            });
+            break;
+            
+        case 'TRAFFIC_BURST':
+            STATE.intervention.trafficBurstMultiplier = 1.0;
+            break;
+            
+        case 'SERVICE_OUTAGE':
+            STATE.services.forEach(s => {
+                if (s.isDisabled) {
+                    s.isDisabled = false;
+                    s.mesh.material.opacity = 1.0;
+                    s.mesh.material.transparent = false;
+                }
+            });
+            break;
+    }
+    
+    STATE.intervention.activeEvent = null;
+    addInterventionWarning('✅ Event ended', 'info', 2000);
+    STATE.sound?.playSuccess();
+}
+
+function updateServiceHealthIndicators() {
+    if (STATE.gameMode !== 'survival') return;
+    if (!CONFIG.survival.degradation?.enabled) return;
+    
+    const healthContainer = document.getElementById('service-health-list');
+    if (!healthContainer) return;
+    
+    const criticalServices = STATE.services.filter(s => 
+        s.health < (CONFIG.survival.degradation?.criticalHealth || 30)
+    );
+    
+    if (criticalServices.length === 0) {
+        healthContainer.innerHTML = '<div class="text-green-400 text-xs">All services healthy</div>';
+        return;
+    }
+    
+    healthContainer.innerHTML = criticalServices.map(s => `
+        <div class="flex justify-between items-center text-xs mb-1">
+            <span class="text-red-400">${s.type.toUpperCase()}</span>
+            <span class="text-red-300">${Math.round(s.health)}% HP</span>
+        </div>
+    `).join('');
+}
+
+// ==================== END INTERVENTION MECHANICS ====================
 
 // ==================== END BALANCE OVERHAUL FUNCTIONS ====================
 
@@ -748,7 +1009,18 @@ container.addEventListener('mousedown', (e) => {
     const i = getIntersect(e.clientX, e.clientY);
     if (STATE.activeTool === 'select') {
         const i = getIntersect(e.clientX, e.clientY);
-        if (i.type === 'service') { draggedNode = STATE.services.find(s => s.id === i.id); }
+        if (i.type === 'service') {
+            const svc = STATE.services.find(s => s.id === i.id);
+            // Check if service needs repair (double-click logic could be added)
+            if (svc && svc.health < 80 && CONFIG.survival.degradation?.enabled) {
+                // Repair on click when damaged
+                if (svc.repair()) {
+                    addInterventionWarning(`🔧 ${svc.type.toUpperCase()} repaired!`, 'info', 2000);
+                    return;
+                }
+            }
+            draggedNode = svc;
+        }
         else if (i.type === 'internet') { draggedNode = STATE.internetNode; }
         if (draggedNode) {
             isDraggingNode = true;
@@ -1065,7 +1337,9 @@ function animate(time) {
     STATE.requests.forEach(r => r.update(dt));
 
     STATE.spawnTimer += dt;
-    if (STATE.currentRPS > 0 && STATE.spawnTimer > (1 / STATE.currentRPS)) {
+    // Apply traffic burst multiplier from random events
+    const effectiveRPS = STATE.currentRPS * (STATE.intervention?.trafficBurstMultiplier || 1.0);
+    if (effectiveRPS > 0 && STATE.spawnTimer > (1 / effectiveRPS)) {
         STATE.spawnTimer = 0;
         spawnRequest();
         // Only ramp up in survival mode - use logarithmic growth
@@ -1080,6 +1354,11 @@ function animate(time) {
     }
 
     updateMaliciousSpike(dt);
+    
+    // Intervention mechanics updates
+    updateTrafficShift(dt);
+    updateRandomEvents(dt);
+    updateServiceHealthIndicators();
 
     document.getElementById('money-display').innerText = `$${Math.floor(STATE.money)}`;
 

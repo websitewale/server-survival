@@ -68,6 +68,10 @@ class Service {
         this.tierRings = [];
         this.rrIndex = 0;
 
+        // Service health for degradation mechanic
+        this.health = 100;
+        this.originalColor = mat.color.getHex();
+
         // SQS queue fill indicator
         if (type === 'sqs') {
             const fillGeo = new THREE.BoxGeometry(3.8, 0.6, 1.8);
@@ -128,7 +132,8 @@ class Service {
     }
 
     processQueue() {
-        while (this.processing.length < this.config.capacity && this.queue.length > 0) {
+        const effectiveCapacity = this.getEffectiveCapacity();
+        while (this.processing.length < effectiveCapacity && this.queue.length > 0) {
             const req = this.queue.shift();
 
             if (this.type === 'waf' && req.type === TRAFFIC_TYPES.MALICIOUS) {
@@ -158,6 +163,24 @@ class Service {
     }
 
     update(dt) {
+        // Service degradation mechanic
+        if (CONFIG.survival.degradation?.enabled && STATE.gameMode === 'survival') {
+            const degradeConfig = CONFIG.survival.degradation;
+            const load = this.totalLoad;
+            
+            if (load > 0.3) {
+                // Degrade based on load - higher load = faster degradation
+                const degradeAmount = degradeConfig.degradeRate * load * dt;
+                this.health = Math.max(0, this.health - degradeAmount);
+            } else if (load < 0.1 && this.health < 100) {
+                // Auto-repair when idle
+                this.health = Math.min(100, this.health + degradeConfig.autoRepairRate * dt);
+            }
+            
+            // Update visual appearance based on health
+            this.updateHealthVisual();
+        }
+
         if (STATE.upkeepEnabled) {
             const multiplier = typeof getUpkeepMultiplier === 'function' ? getUpkeepMultiplier() : 1.0;
             STATE.money -= (this.config.upkeep / 60) * dt * multiplier;
@@ -178,7 +201,12 @@ class Service {
                 this.processing.splice(i, 1);
 
                 const failChance = calculateFailChanceBasedOnLoad(this.totalLoad);
-                if (Math.random() < failChance) {
+                // Increase fail chance when health is low
+                const healthPenalty = this.health < (CONFIG.survival.degradation?.criticalHealth || 30)
+                    ? (1 - this.health / 100) * 0.5 
+                    : 0;
+                const totalFailChance = Math.min(1, failChance + healthPenalty);
+                if (Math.random() < totalFailChance) {
                     failRequest(job.req);
                     continue;
                 }
@@ -373,6 +401,82 @@ class Service {
         }
         this.mesh.geometry.dispose();
         this.mesh.material.dispose();
+    }
+
+    updateHealthVisual() {
+        if (!this.mesh || !this.mesh.material) return;
+        
+        const criticalHealth = CONFIG.survival.degradation?.criticalHealth || 30;
+        
+        if (this.health < criticalHealth) {
+            // Critical - red tint and pulsing
+            const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+            this.mesh.material.color.setHex(0xff0000);
+            this.mesh.material.emissive = new THREE.Color(0xff0000);
+            this.mesh.material.emissiveIntensity = pulse * 0.3;
+        } else if (this.health < 60) {
+            // Damaged - orange tint
+            this.mesh.material.color.setHex(0xff8800);
+            this.mesh.material.emissive = new THREE.Color(0x000000);
+            this.mesh.material.emissiveIntensity = 0;
+        } else if (this.health < 80) {
+            // Worn - yellow tint
+            const healthRatio = this.health / 100;
+            const r = (1 - healthRatio) * 255 + healthRatio * ((this.originalColor >> 16) & 0xff);
+            const g = healthRatio * ((this.originalColor >> 8) & 0xff);
+            const b = healthRatio * (this.originalColor & 0xff);
+            this.mesh.material.color.setRGB(r/255, g/255, b/255);
+            this.mesh.material.emissive = new THREE.Color(0x000000);
+            this.mesh.material.emissiveIntensity = 0;
+        } else {
+            // Healthy - original color
+            this.mesh.material.color.setHex(this.originalColor);
+            this.mesh.material.emissive = new THREE.Color(0x000000);
+            this.mesh.material.emissiveIntensity = 0;
+        }
+    }
+
+    repair() {
+        if (this.health >= 100) return false;
+        
+        const repairConfig = CONFIG.survival.degradation;
+        const repairCost = this.config.cost * (repairConfig?.repairCost || 0.1);
+        
+        if (STATE.money < repairCost) {
+            flashMoney();
+            return false;
+        }
+        
+        STATE.money -= repairCost;
+        this.health = 100;
+        this.updateHealthVisual();
+        STATE.sound?.playPlace();
+        return true;
+    }
+
+    getEffectiveCapacity() {
+        // Reduce capacity when health is low
+        let capacity = this.config.capacity;
+        
+        // Apply health-based reduction
+        const criticalHealth = CONFIG.survival.degradation?.criticalHealth || 30;
+        if (this.health < criticalHealth) {
+            // Linear reduction from critical to 0 health: 100% -> 30% capacity
+            const healthRatio = this.health / criticalHealth;
+            capacity = Math.max(1, Math.floor(capacity * (0.3 + 0.7 * healthRatio)));
+        }
+        
+        // Apply temporary capacity reduction from random events
+        if (this.tempCapacityReduction && this.tempCapacityReduction < 1) {
+            capacity = Math.max(1, Math.floor(capacity * this.tempCapacityReduction));
+        }
+        
+        // Check if service is disabled
+        if (this.isDisabled) {
+            return 0;
+        }
+        
+        return capacity;
     }
 
     static restore(serviceData, pos) {
